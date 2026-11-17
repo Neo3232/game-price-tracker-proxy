@@ -1,0 +1,1 @@
+{"description":"Tiny Vercel proxy so the shareable Game Price Tracker can fetch CheapShark live prices from any browser.","engines":{"node":">=18"},"name":"game-price-tracker-proxy","private":true,"type":"module","version":"1.0.0"}
