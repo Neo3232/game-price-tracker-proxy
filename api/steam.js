@@ -39,7 +39,9 @@ export default async function handler(req, res) {
   }
 
   const upstream = new URL(`https://store.steampowered.com/api/${kind}`);
-  upstream.searchParams.set("appids", ids.join(","));
+  // Steam names the id param per endpoint: appdetails reads "appids",
+  // packagedetails reads "packageids" (it answers null to "appids").
+  upstream.searchParams.set(kind === "packagedetails" ? "packageids" : "appids", ids.join(","));
   upstream.searchParams.set("cc", cc);
   if (kind === "appdetails") upstream.searchParams.set("filters", filters);
 
