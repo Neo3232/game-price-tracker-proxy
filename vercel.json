@@ -1,1 +1,1 @@
-{"$schema":"https://openapi.vercel.sh/vercel.json","functions":{"api/cheapshark.js":{"maxDuration":15},"api/steam.js":{"maxDuration":15}}}
+{"$schema":"https://openapi.vercel.sh/vercel.json","functions":{"api/cheapshark.js":{"maxDuration":15},"api/steam.js":{"maxDuration":15},"api/img.js":{"maxDuration":15}}}
