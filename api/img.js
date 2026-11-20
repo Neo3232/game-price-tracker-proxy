@@ -1,0 +1,135 @@
+// Vercel serverless proxy for game artwork — Game Price Tracker Public
+// The user's phone/network DNS cannot resolve Steam's or Epic's domains
+// at all (net::ERR_NAME_NOT_RESOLVED), so browsers on that network can
+// never load art directly from those CDNs. Prices already work because
+// they go through this proxy server-side; this endpoint does the same
+// for pictures: the tracker page asks this proxy for the image, the
+// proxy fetches it from the art CDN, and the browser only ever talks
+// to game-price-tracker-proxy.vercel.app (which resolves fine).
+// Only forwards to a small allow-list of game-art hosts, only images,
+// max ~4 MB (Vercel serverless response limit). No personal data.
+//
+// Resilience: upstream fetches are retried, and a Steam CDN URL that
+// fails is retried on Steam's other mirror hosts with the same path,
+// because a single failed fetch used to cost a card its picture.
+
+const ALLOWED_HOSTS = new Set([
+  // Steam art CDNs
+  "cdn.cloudflare.steamstatic.com",
+  "shared.fastly.steamstatic.com",
+  "cdn.akamai.steamstatic.com",
+  "shared.akamai.steamstatic.com",
+  // Epic art CDNs
+  "cdn1.epicgames.com",
+  "cdn2.unrealengine.com",
+  "store-site-backend-static.ak.epicgames.com",
+  // Other stores the tracker shows art from
+  "images.gog-statics.com",
+  "images.greenmangaming.com",
+  "www.cheapshark.com",
+  "cdn.cheapshark.com",
+  // More store art hosts the tracker shows (added 2026-11-20: the proxy
+  // refused these outright, which stranded cards whose only art lives
+  // here — Back 4 Blood / Dead Island 2 / ONE PIECE thumbs and the
+  // GamerPower giveaway art — so their pictures must go through the
+  // proxy too, never direct)
+  "sttc.gamersgate.com",
+  "cdn.humblebundle.com",
+  "cdn.fanatical.com",
+  "www.wingamestore.com",
+  "store.ubisoft.com",
+  "www.gamerpower.com",
+]);
+
+// Steam's mirror hosts: same file lives on each of these.
+const STEAM_MIRRORS = [
+  "cdn.cloudflare.steamstatic.com",
+  "shared.fastly.steamstatic.com",
+  "cdn.akamai.steamstatic.com",
+  "shared.akamai.steamstatic.com",
+];
+
+const MAX_BYTES = 4 * 1024 * 1024;
+const ATTEMPTS = 3;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchImage(url) {
+  const upstreamRes = await fetch(url, {
+    headers: {
+      "User-Agent": "GamePriceTracker-Public/1.0 (Vercel proxy; contact: kingneo011@gmail.com)",
+      Accept: "image/*",
+    },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!upstreamRes.ok) {
+    throw new Error(`Upstream HTTP ${upstreamRes.status}`);
+  }
+  const type = upstreamRes.headers.get("content-type") || "";
+  if (!type.startsWith("image/")) {
+    throw new Error("Upstream did not return an image");
+  }
+  const len = Number(upstreamRes.headers.get("content-length") || 0);
+  if (len > MAX_BYTES) {
+    throw new Error("Image too large");
+  }
+  const buf = Buffer.from(await upstreamRes.arrayBuffer());
+  if (buf.length > MAX_BYTES) {
+    throw new Error("Image too large");
+  }
+  return { buf, type: type.split(";")[0] };
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "GET") return res.status(405).json({ error: "GET only" });
+
+  const raw = String(req.query.u || "");
+  if (!raw) return res.status(400).json({ error: "Missing u param" });
+  let upstream;
+  try {
+    upstream = new URL(raw);
+  } catch {
+    return res.status(400).json({ error: "Bad u param" });
+  }
+  if (upstream.protocol !== "https:") {
+    return res.status(400).json({ error: "Only https upstream URLs" });
+  }
+  const host = upstream.hostname.toLowerCase();
+  if (!ALLOWED_HOSTS.has(host)) {
+    return res.status(400).json({ error: "Host not allowed" });
+  }
+
+  // Candidate URLs: the requested one first, then (for Steam hosts) the
+  // same path on Steam's other mirrors. Each gets up to ATTEMPTS tries.
+  const candidates = [upstream.toString()];
+  if (STEAM_MIRRORS.includes(host)) {
+    for (const mirror of STEAM_MIRRORS) {
+      if (mirror === host) continue;
+      const alt = new URL(upstream.toString());
+      alt.hostname = mirror;
+      candidates.push(alt.toString());
+    }
+  }
+
+  let lastError = "Upstream did not answer ok";
+  for (const candidate of candidates) {
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      try {
+        const { buf, type } = await fetchImage(candidate);
+        // Art barely changes: cache at the edge for a day.
+        res.setHeader("Cache-Control", "s-maxage=86400, stale-while-revalidate=86400");
+        res.setHeader("Content-Type", type);
+        res.setHeader("Content-Length", String(buf.length));
+        return res.status(200).send(buf);
+      } catch (err) {
+        lastError = String(err.message || err);
+        if (attempt < ATTEMPTS) await sleep(250 * attempt);
+      }
+    }
+  }
+  return res.status(502).json({ error: "Art host did not answer", detail: lastError });
+}
